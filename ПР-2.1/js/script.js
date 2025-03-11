@@ -1,73 +1,324 @@
+document.addEventListener("DOMContentLoaded", () => {
+    const DB_NAME = "GalleryDB";
+    const DB_VERSION = 4; // Увеличена версия для сброса кэша
+    let db;
 
-    const buttons = document.querySelectorAll(".filter-buttons button");
-    const gallery = document.querySelector(".gallery");
-    const form = document.getElementById("upload-form");
-    const imageUpload = document.getElementById("image-upload");
-    const titleInput = document.getElementById("image-title");
-    const descriptionInput = document.getElementById("image-description");
-    const categorySelect = document.getElementById("image-category");
+    // Инициализация IndexedDB
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-    // Загрузка сохраненных изображений
-    const savedImages = JSON.parse(localStorage.getItem("galleryImages")) || [];
-    savedImages.forEach(image => addImageToGallery(image, false));
+    request.onupgradeneeded = (e) => {
+        db = e.target.result;
+        if (!db.objectStoreNames.contains('images')) {
+            const imageStore = db.createObjectStore('images', { keyPath: 'id', autoIncrement: true });
+            imageStore.createIndex('category', 'category', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('categories')) {
+            const categoryStore = db.createObjectStore('categories', { keyPath: 'name' });
+            categoryStore.createIndex('name', 'name', { unique: true });
+        }
+    };
 
-    buttons.forEach(button => {
-        button.addEventListener("click", () => {
-            const filter = button.getAttribute("data-filter");
-            const filteredImages = filter === "all" ? savedImages : savedImages.filter(img => img.category === filter);
-            animateGalleryUpdate(filteredImages);
+    request.onsuccess = (e) => {
+        db = e.target.result;
+        initApp();
+    };
+
+    // Основная логика
+    async function initApp() {
+        await loadCategories();
+        await loadImages();
+        setupEventListeners();
+        setupFilterButtons(); // Восстановлен обработчик фильтров
+    }
+
+    // Восстановленный функционал: кнопки фильтрации
+    function setupFilterButtons() {
+        document.querySelector('.filter-buttons').addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') {
+                const filter = e.target.dataset.filter;
+                loadImages(filter === 'all' ? 'all' : filter);
+                document.querySelectorAll('.filter-buttons button').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                e.target.classList.add('active');
+            }
         });
-    });
+    }
 
-    form.addEventListener("submit", (event) => {
+    // Загрузка категорий
+    async function loadCategories() {
+        return new Promise((resolve) => {
+            const tx = db.transaction('categories', 'readonly');
+            const store = tx.objectStore('categories');
+            const req = store.getAll();
 
-        event.preventDefault();
-        const file = imageUpload.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = () => {
-            const newImage = {
-                src: reader.result,
-                title: titleInput.value,
-                description: descriptionInput.value,
-                category: categorySelect.value
+            req.onsuccess = () => {
+                updateCategoryUI(req.result);
+                resolve();
             };
-            savedImages.push(newImage);
-            localStorage.setItem("galleryImages", JSON.stringify(savedImages));
-            animateGalleryUpdate(savedImages);
-            form.reset();
-        };
-        reader.readAsDataURL(file);
-    });
-
-    function animateGalleryUpdate(images) {
-        const cards = document.querySelectorAll(".card");
-        cards.forEach(card => {
-            card.style.opacity = "0";
-            card.style.transform = "scale(0.9)";
         });
-        setTimeout(() => {
-            gallery.innerHTML = "";
-            images.forEach(image => addImageToGallery(image, true));
-        }, 300);
     }
 
-    function addImageToGallery(image, animate) {
-        const newCard = document.createElement("div");
-        newCard.classList.add("card");
-        newCard.setAttribute("data-category", image.category);
-        newCard.innerHTML = `
-            <img src="${image.src}" alt="${image.title}">
-            <h3>${image.title}</h3>
-            <p>${image.description}</p>
+    // Обновление интерфейса категорий
+    function updateCategoryUI(categories) {
+        const container = document.querySelector('.categories');
+        container.innerHTML = `
+            <div class="category all-category active">Все изображения</div>
+            <div class="category non-sort" data-name="uncategorized">Неотсортированные</div>
+            ${categories.map(c => `
+                <div class="category" data-name="${c.name}">
+                    ${c.name}
+                    <button class="delete-category">×</button>
+                </div>
+            `).join('')}
+            <div class="category add-category">
+                <span class="add-text">Добавить категорию</span>
+                <input type="text" id="new-category-input" class="hidden">
+            </div>
         `;
-        newCard.style.opacity = "0";
-        newCard.style.transform = "scale(0.9)";
-        gallery.appendChild(newCard);
-        setTimeout(() => {
-            newCard.style.opacity = "1";
-            newCard.style.transform = "scale(1)";
-        }, 100);
+    
+        // Обработчик для "Неотсортированные"
+        document.querySelector('.category.non-sort').addEventListener('click', () => {
+            loadImages('uncategorized');
+            document.querySelectorAll('.category').forEach(cat => cat.classList.remove('active'));
+            document.querySelector('.category.non-sort').classList.add('active');
+        });
+
+        // Обработчики событий
+        document.querySelectorAll('.category').forEach(category => {
+            category.addEventListener('click', (e) => {
+                if (e.target.classList.contains('delete-category')) return;
+                const categoryName = category.dataset.name || 'all';
+                loadImages(categoryName);
+                document.querySelectorAll('.category').forEach(cat => cat.classList.remove('active'));
+                category.classList.add('active');
+            });
+        });
+
+        // Обработчик удаления категории
+        document.querySelectorAll('.delete-category').forEach(btn => {
+            btn.addEventListener('click', handleDeleteCategory);
+        });
+
+        const newCategoryInput = document.getElementById('new-category-input');
+        newCategoryInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && newCategoryInput.value.trim()) {
+                addCategory(newCategoryInput.value.trim());
+                newCategoryInput.value = '';
+                newCategoryInput.classList.add('hidden');
+            }
+        });
+
+        // Обновление выпадающих списков
+        updateSelectOptions(categories);
     }
 
+    // Обновление select-элементов
+    function updateSelectOptions(categories) {
+        const selects = document.querySelectorAll('select#image-category, select#edit-category');
+        selects.forEach(select => {
+            select.innerHTML = '<option value="" disabled selected>Выберите категорию</option>';
+            categories.forEach(category => {
+                const option = document.createElement('option');
+                option.value = category.name;
+                option.textContent = category.name;
+                select.appendChild(option);
+            });
+        });
+    }
+
+    // Добавление категории
+    function addCategory(name) {
+        const tx = db.transaction('categories', 'readwrite');
+        const store = tx.objectStore('categories');
+        const req = store.add({ name });
+
+        req.onsuccess = () => loadCategories();
+        req.onerror = () => alert('Категория уже существует!');
+    }
+
+    // Удаление категории
+    function handleDeleteCategory(e) {
+        const categoryName = e.target.closest('.category').dataset.name;
+        const tx = db.transaction(['categories', 'images'], 'readwrite');
+        const categoryStore = tx.objectStore('categories');
+        const imageStore = tx.objectStore('images');
+
+        // Удаление категории
+        categoryStore.delete(categoryName);
+
+        // Перенос изображений в uncategorized
+        const cursorRequest = imageStore.openCursor();
+        cursorRequest.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) {
+                if (cursor.value.category === categoryName) {
+                    cursor.update({ ...cursor.value, category: 'uncategorized' });
+                }
+                cursor.continue();
+            }
+        };
+
+        tx.oncomplete = () => {
+            loadCategories();
+            loadImages();
+        };
+    }
+
+    // Загрузка изображений
+    async function loadImages(filter = 'all') {
+        return new Promise((resolve) => {
+            const tx = db.transaction('images', 'readonly');
+            const store = tx.objectStore('images');
+            const req = store.getAll();
+    
+            req.onsuccess = () => {
+                let images;
+                if (filter === 'all') {
+                    images = req.result;
+                } else if (filter === 'uncategorized') {
+                    images = req.result.filter(img => img.category === 'uncategorized');
+                } else {
+                    images = req.result.filter(img => img.category === filter);
+                }
+                updateGalleryUI(images);
+                resolve();
+            };
+        });
+    }
+
+    // Обновление галереи
+    function updateGalleryUI(images) {
+        const gallery = document.querySelector('.gallery');
+        gallery.innerHTML = images.map(img => `
+            <div class="card" data-id="${img.id}">
+                <img src="${img.src}" alt="${img.title}">
+                <h3>${img.title}</h3>
+                <p>${img.description}</p>
+                <p class="category-label">Категория: ${img.category}</p>
+                <button class="edit-btn">Редактировать</button>
+                <button class="delete-btn">Удалить</button>
+            </div>
+        `).join('');
+
+        // Обработчики событий
+        document.querySelectorAll('.edit-btn').forEach(btn => {
+            btn.addEventListener('click', handleEditImage);
+        });
+
+        document.querySelectorAll('.delete-btn').forEach(btn => {
+            btn.addEventListener('click', handleDeleteImage);
+        });
+    }
+
+    // Обработчик редактирования изображения
+    function handleEditImage(e) {
+        const card = e.target.closest('.card');
+        const id = parseInt(card.dataset.id);
+
+        const tx = db.transaction('images', 'readonly');
+        const store = tx.objectStore('images');
+        const req = store.get(id);
+
+        req.onsuccess = () => {
+            const image = req.result;
+            openEditModal(image);
+        };
+    }
+
+    // Открытие модального окна редактирования
+    function openEditModal(image) {
+        document.getElementById('edit-image-preview').src = image.src; 
+        const modal = document.getElementById('edit-modal');
+        document.getElementById('edit-image-preview').src = image.src;
+        document.getElementById('edit-title').value = image.title;
+        document.getElementById('edit-description').value = image.description;
+        document.getElementById('edit-category').value = image.category;
+        modal.style.display = 'block';
+
+        // Обработчик сохранения изменений
+        document.getElementById('save-changes').onclick = () => {
+            const updatedImage = {
+                id: image.id,
+                title: document.getElementById('edit-title').value,
+                description: document.getElementById('edit-description').value,
+                category: document.getElementById('edit-category').value,
+                src: image.src
+            };
+
+            const tx = db.transaction('images', 'readwrite');
+            const store = tx.objectStore('images');
+            store.put(updatedImage);
+
+            tx.oncomplete = () => {
+                loadImages();
+                modal.style.display = 'none';
+            };
+        };
+
+        // Обработчик отмены
+        document.getElementById('cancel-changes').onclick = () => {
+            modal.style.display = 'none';
+        };
+    }
+
+    // Обработчик удаления изображения
+    function handleDeleteImage(e) {
+        const card = e.target.closest('.card');
+        const id = parseInt(card.dataset.id);
+
+        const confirmModal = document.getElementById('confirm-modal');
+        confirmModal.style.display = 'block';
+
+        document.getElementById('confirm-delete').onclick = () => {
+            const tx = db.transaction('images', 'readwrite');
+            const store = tx.objectStore('images');
+            store.delete(id);
+
+            tx.oncomplete = () => {
+                loadImages();
+                confirmModal.style.display = 'none';
+            };
+        };
+
+        document.getElementById('cancel-delete').onclick = () => {
+            confirmModal.style.display = 'none';
+        };
+    }
+
+    // Обработчик добавления изображения
+    function setupEventListeners() {
+        document.getElementById('upload-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const file = document.getElementById('image-upload').files[0];
+            const title = document.getElementById('image-title').value;
+            const description = document.getElementById('image-description').value;
+            const category = document.getElementById('image-category').value;
+
+            if (!file || !title || !description || !category) {
+                alert('Заполните все поля!');
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                const image = {
+                    src: reader.result,
+                    title,
+                    description,
+                    category
+                };
+
+                const tx = db.transaction('images', 'readwrite');
+                const store = tx.objectStore('images');
+                store.add(image);
+
+                tx.oncomplete = () => {
+                    loadImages();
+                    document.getElementById('upload-form').reset();
+                };
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+});
